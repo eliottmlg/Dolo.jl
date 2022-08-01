@@ -20,6 +20,8 @@ using LaTeXStrings
 filename = "C:/Users/t480/GitHub/Dolo.jl/examples/models/consumption_savings_iid.yaml"
 filename = "C:/Users/t480/GitHub/Pablo-Winant-internship/julia_training/EGM/consumption_savings_ar1.yaml"
 filename = "C:/Users/t480/GitHub/Pablo-Winant-internship/julia_training/EGM/consumption_savings_mc.yaml"
+filename = "C:/Users/t480/GitHub/Dolo.jl/examples/models/rbc_catastrophe_newstyle.yaml"
+
 
 readlines(filename)
 model = yaml_import(filename)  
@@ -119,11 +121,11 @@ struct MyDR # creating a structure for neater incorporation
     itp::Vector{Any}
 end
 (mydr::MyDR)(i,s) = mydr.itp[i](s)
-
 # interpolated policy functions
 mydr(i,s) = φs[2].itp[i](s)
 mydrlogs(i,s,t) = φs[3][t].itp[i](s)
 
+#=
 function toyegm(model; φfunction=nothing, T=500, trace=false, resample=false, τ_η=1e-8)
     logs = []
     
@@ -131,6 +133,8 @@ function toyegm(model; φfunction=nothing, T=500, trace=false, resample=false, �
 
     φ0 = φfunction
     w_grid = s0
+
+    # here 
 
     if resample
         for t in 1:T
@@ -174,10 +178,152 @@ function toyegm(model; φfunction=nothing, T=500, trace=false, resample=false, �
         return dr, res
     end     
 end
+=#
+
+function toyegm(model; φfunction=nothing, T=500, trace=false, resample=false, τ_η=1e-8)
+    logs = []
+    
+    local cprime, φ0
+
+    φ0 = φfunction
+    w_grid = s0
+
+        for t in 1:T
+            cprime = consumption_a(model,φ0) # c_new = (u')^(-1)(A)
+            for i in 1:size_states
+                for n in 1:length(w_grid)
+                    w_grid[n] = Dolo.reverse_state(model,m,a,cprime[n,i],p) # s = a\tau(m,a,x), reverse_state
+                    cprime[n,i] = min(w_grid[n], cprime[n,i]) # c_new cannot exceed M
+                end
+                cprimeFloat = reinterpret(Float64, cprime) # only works in one dimension 
+                w_gridFloat = reinterpret(Float64,w_grid) # needs one poststate, many controls allowed 
+                itp[i] = LinearInterpolation(w_gridFloat, cprimeFloat[:,i], extrapolation_bc = Line()) # cprime good?
+            end # itp linear combs
+            trace ? res = MyDR(itp) : nothing
+            trace ? push!(logs,deepcopy(res)) : nothing
+        end
+
+    dr = cprime
+    res = MyDR(itp)
+    
+    if trace
+        return dr, res, logs
+    else
+        return dr, res
+    end     
+end
+
+φs = @time toyegm(model;φfunction,T=10,resample=false,trace=false)
+
+function egm(model; φfunction=nothing, T=500, trace=false, resample=false, τ_η=1e-8)
+    logs = []
+    
+    local cprime, φ0
+
+    φ0 = φfunction
+    w_grid = s0
+
+        for t in 1:T
+            cprime = consumption_a(model,φ0) # c_new = (u')^(-1)(A)
+            for i in 1:size_states
+                for n in 1:length(w_grid)
+                    w_grid[n] = Dolo.reverse_state(model,m,a,cprime[n,i],p) # s = a\tau(m,a,x), reverse_state
+                    cprime[n,i] = min(w_grid[n], cprime[n,i]) # c_new cannot exceed M
+                end
+                cprimeFloat = reinterpret(Float64, cprime) # only works in one dimension 
+                w_gridFloat = reinterpret(Float64,w_grid) # needs one poststate, many controls allowed 
+                itp[i] = LinearInterpolation(w_gridFloat, cprimeFloat[:,i], extrapolation_bc = Line()) # cprime good?
+            end # itp linear combs
+            trace ? res = MyDR(itp) : nothing
+            trace ? push!(logs,deepcopy(res)) : nothing
+        end
+
+    if resample
+            for i in 1:size_states
+                for n in 1:length(w_grid)
+                    # we resample the solution so that it interpolates exactly
+                    # on the grid specified in m.w_grid (not the endogenous one.)
+                    #nx = min.(w_grid, mydr(i,w_grid))
+                    nx = cprime
+                    nx[n,i] = min(s0[n], itp[i](s0[n]))
+                    #itp[i] = LinearInterpolation(w_grid, nx, extrapolation_bc=Line())
+                    nxFloat = reinterpret(Float64,nx) # needs one poststate, many controls allowed 
+                    s0Float = reinterpret(Float64,s0) # needs one poststate, many controls allowed 
+                    itp[i] = LinearInterpolation(s0Float,nxFloat[:,i];extrapolation_bc=Line())
+                end
+            end
+    end
+        #res = MyDR(itp)
+        #mydr(i,w_grid) = res.itp[i](w_grid)
+        # mydr(1,x)
+
+
+    dr = cprime
+    res = MyDR(itp)
+    
+    if trace
+        return dr, res, logs
+    else
+        return dr, res
+    end     
+end
+
+φs = @time egm(model; φfunction,T=10,resample=true,trace=false)
+# n not defined 
+
+# plotting functions 
+function statesDR(size_states)
+    plt = plot()
+    plot!(plt, s0Float, s0Float)
+    for i in 1:size_states
+        plt = plot!(plt, s0Float, mydr(i,s0Float); legend = true)
+    end
+    plt
+end
+
+function iterationDR(T) 
+    plt = plot()
+    plot!(plt, s0Float,mydrlogs(1,s0Float,1); marker="o", legend=false)
+    for t in 1:T
+        plot!(plt, s0Float, mydrlogs(1,s0Float,t))
+    end
+    plot!(plt, s0Float,mydrlogs(1,s0Float,T); marker="o")
+    plt
+end
+
+toyegm(model; φfunction,T=500,resample=false,trace=false)
+
+
+# results output function
+function results(model=model,trace=false,resample=false,graphstate=false,graphiteration=false)
+    @time φs = toyegm(model; φfunction,T=500,resample=resample,trace=trace)
+    mydr(i,s) = φs[2].itp[i](s)
+    mydrlogs(i,s,t) = φs[3][t].itp[i](s)
+    size_states = size(φs[1],2)
+    graphstate ? statesDR(size_states) : nothing
+    graphiteration ? iterationDR(T) : nothing
+end
+
+results(model;trace=false, resample=true, graphstate=true, graphiteration=false)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # policy functions for each state
-@time φs = toyegm(model; φfunction,resample=true)
-mydr(1,s0Float)
 function policyfunction(size_states)
     plt = plot()
     plot!(plt, s0Float, s0Float)
